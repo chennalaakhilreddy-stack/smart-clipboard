@@ -4,7 +4,7 @@ import threading
 from dataclasses import dataclass
 
 from database import ClipboardDatabase
-
+from shortcuts import ShortcutManager
 
 @dataclass
 class ClipboardItem:
@@ -341,7 +341,8 @@ exit
 def main():
     clipboard = SmartClipboard()
     clipboard.start_monitoring()
-
+    shortcuts = ShortcutManager(clipboard)
+    shortcuts.start()
     print("""
 ╔══════════════════════════════════════╗
 ║          SMART CLIPBOARD             ║
@@ -443,6 +444,7 @@ Type 'help' for commands.
         print("\nStopping...")
 
     finally:
+        shortcuts.stop()
         clipboard.stop_monitoring()
         print("Smart Clipboard stopped.")
 
