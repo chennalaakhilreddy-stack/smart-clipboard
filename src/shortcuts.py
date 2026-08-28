@@ -4,33 +4,27 @@ import keyboard
 class ShortcutManager:
     def __init__(self, clipboard):
         self.clipboard = clipboard
+        self.fifo_hotkey = None
+        self.lifo_hotkey = None
 
     def start(self):
-        keyboard.add_hotkey(
-            "ctrl+alt+v",
-            self.copy_latest
+        self.fifo_hotkey = keyboard.add_hotkey(
+            "ctrl+shift+c",
+            self.clipboard.fifo,
+            suppress=True
         )
 
-        keyboard.add_hotkey(
-            "ctrl+alt+r",
-            self.reverse_words
+        self.lifo_hotkey = keyboard.add_hotkey(
+            "ctrl+shift+l",
+            self.clipboard.lifo,
+            suppress=True
         )
-
-        print("Global shortcuts enabled.")
-        print("Ctrl+Alt+V → copy latest")
-        print("Ctrl+Alt+R → reverse word order")
-
-    def copy_latest(self):
-        if self.clipboard.items:
-            self.clipboard.select(
-                len(self.clipboard.items) - 1
-            )
-
-    def reverse_words(self):
-        if self.clipboard.items:
-            self.clipboard.reverse_words(
-                len(self.clipboard.items) - 1
-            )
 
     def stop(self):
-        keyboard.unhook_all()
+        if self.fifo_hotkey is not None:
+            keyboard.remove_hotkey(self.fifo_hotkey)
+
+        if self.lifo_hotkey is not None:
+            keyboard.remove_hotkey(self.lifo_hotkey)
+
+        self.clipboard.disable_paste_hook()

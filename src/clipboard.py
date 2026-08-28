@@ -1,10 +1,12 @@
 import pyperclip
 import time
 import threading
+import keyboard
 from dataclasses import dataclass
 
 from database import ClipboardDatabase
 from shortcuts import ShortcutManager
+
 
 @dataclass
 class ClipboardItem:
@@ -21,7 +23,12 @@ class SmartClipboard:
         self.running = False
         self.lock = threading.Lock()
 
-        # Load previously saved clipboard items.
+        self.paste_mode = None
+        self.paste_items = []
+        self.paste_index = 0
+        self.paste_hotkey = None
+        self.ignore_clipboard_until = 0
+
         self.load_history()
 
     def load_history(self):
@@ -45,10 +52,9 @@ class SmartClipboard:
         )
         thread.start()
 
-        print("Clipboard monitoring started.")
-
     def stop_monitoring(self):
         self.running = False
+        self.disable_paste_hook()
         self.database.close()
 
     def _monitor(self):
@@ -56,8 +62,10 @@ class SmartClipboard:
             try:
                 current = pyperclip.paste()
 
-                # Store the new clipboard content when it changes.
-                if current != self.last_clipboard:
+                if (
+                    current != self.last_clipboard
+                    and time.monotonic() >= self.ignore_clipboard_until
+                ):
                     self.last_clipboard = current
 
                     if current:
@@ -75,7 +83,6 @@ class SmartClipboard:
             return
 
         with self.lock:
-            # Avoid storing the same item repeatedly.
             if self.items and self.items[-1].text == text:
                 return
 
@@ -91,7 +98,69 @@ class SmartClipboard:
                 )
             )
 
-        print(f"\nAdded: {text}")
+            if self.paste_mode:
+                self.paste_items.append(text)
+
+    def set_paste_mode(self, mode):
+        self.disable_paste_hook()
+
+        with self.lock:
+            self.paste_mode = mode
+            self.paste_items = []
+            self.paste_index = 0
+
+        self.enable_paste_hook()
+
+    def enable_paste_hook(self):
+        if self.paste_hotkey is None:
+            self.paste_hotkey = keyboard.add_hotkey(
+                "ctrl+v",
+                self.smart_paste,
+                suppress=True
+            )
+
+    def disable_paste_hook(self):
+        if self.paste_hotkey is not None:
+            keyboard.remove_hotkey(self.paste_hotkey)
+            self.paste_hotkey = None
+
+    def smart_paste(self):
+        with self.lock:
+            if not self.paste_mode:
+                self.disable_paste_hook()
+                keyboard.press_and_release("ctrl+v")
+                return
+
+            if not self.paste_items:
+                return
+
+            if self.paste_mode == "fifo":
+                text = self.paste_items[self.paste_index]
+            else:
+                text = self.paste_items[
+                    len(self.paste_items) - 1 - self.paste_index
+                ]
+
+            self.paste_index += 1
+            finished = self.paste_index >= len(self.paste_items)
+
+        self.disable_paste_hook()
+
+        self.ignore_clipboard_until = time.monotonic() + 1
+
+        pyperclip.copy(text)
+        self.last_clipboard = text
+
+        time.sleep(0.05)
+        keyboard.press_and_release("ctrl+v")
+
+        if finished:
+            with self.lock:
+                self.paste_mode = None
+                self.paste_items = []
+                self.paste_index = 0
+        else:
+            self.enable_paste_hook()
 
     def show_history(self):
         with self.lock:
@@ -127,9 +196,6 @@ class SmartClipboard:
         pyperclip.copy(item.text)
         self.last_clipboard = item.text
 
-        print(f"\nSelected: {item.text}")
-        print("Ready to paste with Ctrl+V.")
-
     def delete(self, index):
         with self.lock:
             if not 0 <= index < len(self.items):
@@ -146,8 +212,6 @@ class SmartClipboard:
             self.items.pop(index)
             self._save_positions()
 
-            print(f"Deleted: {item.text}")
-
     def pin(self, index):
         with self.lock:
             if not 0 <= index < len(self.items):
@@ -158,8 +222,6 @@ class SmartClipboard:
             item.pinned = True
 
             self.database.update_pin(item.id, True)
-
-            print(f"Pinned: {item.text}")
 
     def unpin(self, index):
         with self.lock:
@@ -172,11 +234,8 @@ class SmartClipboard:
 
             self.database.update_pin(item.id, False)
 
-            print(f"Unpinned: {item.text}")
-
     def clear(self):
         with self.lock:
-            # Pinned items are kept when clearing history.
             self.database.clear_unpinned()
 
             self.items = [
@@ -185,8 +244,6 @@ class SmartClipboard:
             ]
 
             self._save_positions()
-
-            print("Cleared all unpinned items.")
 
     def search(self, query):
         query = query.lower().strip()
@@ -212,6 +269,9 @@ class SmartClipboard:
                 pin = "📌 " if item.pinned else ""
                 preview = item.text.replace("\n", " ")
 
+                if len(preview) > 80:
+                    preview = preview[:80] + "..."
+
                 print(f"{index + 1}. {pin}{preview}")
 
     def move(self, old_index, new_index):
@@ -229,11 +289,6 @@ class SmartClipboard:
 
             self._save_positions()
 
-            print(
-                f"Moved item {old_index + 1} → "
-                f"position {new_index + 1}"
-            )
-
     def _save_positions(self):
         items = [
             {"id": item.id}
@@ -243,26 +298,12 @@ class SmartClipboard:
         self.database.update_positions(items)
 
     def fifo(self):
-        with self.lock:
-            if not self.items:
-                print("History is empty.")
-                return
-
-            print("\nFIFO")
-
-            for item in self.items:
-                print(item.text)
+        self.set_paste_mode("fifo")
+        print("FIFO mode")
 
     def lifo(self):
-        with self.lock:
-            if not self.items:
-                print("History is empty.")
-                return
-
-            print("\nLIFO")
-
-            for item in reversed(self.items):
-                print(item.text)
+        self.set_paste_mode("lifo")
+        print("LIFO mode")
 
     def reverse_words(self, index):
         item = self.get_item(index)
@@ -271,13 +312,10 @@ class SmartClipboard:
             print("Invalid item number.")
             return
 
-        # Reverse the order of words, not individual characters.
         result = " ".join(item.text.split()[::-1])
 
         pyperclip.copy(result)
         self.last_clipboard = result
-
-        print(f"\nResult: {result}")
 
     def uppercase(self, index):
         item = self.get_item(index)
@@ -291,8 +329,6 @@ class SmartClipboard:
         pyperclip.copy(result)
         self.last_clipboard = result
 
-        print(f"\nResult: {result}")
-
     def lowercase(self, index):
         item = self.get_item(index)
 
@@ -304,8 +340,6 @@ class SmartClipboard:
 
         pyperclip.copy(result)
         self.last_clipboard = result
-
-        print(f"\nResult: {result}")
 
 
 def get_number(prompt):
@@ -335,21 +369,30 @@ uppercase
 lowercase
 help
 exit
+
+Shortcuts:
+Ctrl+Shift+C → FIFO
+Ctrl+Shift+L → LIFO
+Ctrl+V → Smart Paste
 """)
 
 
 def main():
     clipboard = SmartClipboard()
     clipboard.start_monitoring()
+
     shortcuts = ShortcutManager(clipboard)
     shortcuts.start()
+
     print("""
 ╔══════════════════════════════════════╗
 ║          SMART CLIPBOARD             ║
 ║               V1                     ║
 ╚══════════════════════════════════════╝
 
-Persistent clipboard history enabled.
+Ctrl+Shift+C → FIFO
+Ctrl+Shift+L → LIFO
+
 Type 'help' for commands.
 """)
 
@@ -392,8 +435,7 @@ Type 'help' for commands.
                 clipboard.clear()
 
             elif command == "search":
-                query = input("Search: ")
-                clipboard.search(query)
+                clipboard.search(input("Search: "))
 
             elif command == "move":
                 clipboard.show_history()
@@ -441,7 +483,7 @@ Type 'help' for commands.
                 print("Unknown command. Type 'help'.")
 
     except KeyboardInterrupt:
-        print("\nStopping...")
+        pass
 
     finally:
         shortcuts.stop()
